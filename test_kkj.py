@@ -1,6 +1,11 @@
 from osgeo import ogr, osr
+import json
 import random
 import os
+
+# Customization of behaviour
+use_refinement = True
+
 
 dir_data = os.path.dirname(__file__)
 
@@ -13,7 +18,7 @@ if hasattr(kkjgeog, 'SetAxisMappingStrategy'):
     kkjgeog.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 kkjgeog.ImportFromEPSG(4123)
 kkjproj_to_kkjgeog = osr.CoordinateTransformation(kkjproj, kkjgeog)
-#kkjgeog_to_kkjproj = osr.CoordinateTransformation(kkjgeog, kkjproj)
+kkjgeog_to_kkjproj = osr.CoordinateTransformation(kkjgeog, kkjproj)
 
 etrs35fin = osr.SpatialReference()
 if hasattr(etrs35fin, 'SetAxisMappingStrategy'):
@@ -42,9 +47,9 @@ def find_triangle(triangles, vertices, x, y):
         x3 = vertices[id3][0]
         y3 = vertices[id3][1]
         lambda_1, lambda_2, lambda_3 = get_barycentric_coord(x1, y1, x2, y2, x3, y3, x, y)
-        if lambda_1 >= 0 and lambda_1 <= 1 and \
-           lambda_2 >= 0 and lambda_2 <= 1 and \
-           lambda_3 >= 0 and lambda_3 <= 1:
+        if lambda_1 >= -1e-10 and lambda_1 <= 1+1e-10 and \
+           lambda_2 >= -1e-10 and lambda_2 <= 1+1e-10 and \
+           lambda_3 >= -1e-10 and lambda_3 <= 1+1e-10:
                return id1, id2, id3, lambda_1, lambda_2, lambda_3
     return None
 
@@ -109,6 +114,185 @@ def read_grid(filename):
         return min_easting, max_easting, step_1, min_northing, max_northing, step_1, grid
 
 
+def etrs_exact_from_xy(triangles, vertices, x, y):
+    id1, id2, id3, lambda_1, lambda_2, lambda_3 = find_triangle(triangles, vertices, x, y)
+    x_tm35fin = vertices[id1][2] * lambda_1 + vertices[id2][2] * lambda_2 + vertices[id3][2] * lambda_3
+    y_tm35fin = vertices[id1][3] * lambda_1 + vertices[id2][3] * lambda_2 + vertices[id3][3] * lambda_3
+    etrs_lon_exact, etrs_lat_exact, _ = etrs35fin_to_etrsgeog.TransformPoint(x_tm35fin, y_tm35fin)
+    return x_tm35fin, y_tm35fin, etrs_lon_exact, etrs_lat_exact
+
+def etrs_exact_from_lonlat(triangles, vertices, lon_kkj, lat_kkj):
+    x, y, _ = kkjgeog_to_kkjproj.TransformPoint(lon_kkj, lat_kkj)
+    return etrs_exact_from_xy(triangles, vertices, x, y)
+
+def etrs_approx_from_lonlat(vertices_geog, lon1, lat1, lon2, lat2, lon3, lat3, id1_geog, id2_geog, id3_geog, lon_kkj, lat_kkj):
+    lambda_1, lambda_2, lambda_3 = get_barycentric_coord(lon1, lat1, lon2, lat2, lon3, lat3, lon_kkj, lat_kkj)
+    etrs_lon = vertices_geog[id1_geog][2] * lambda_1 + vertices_geog[id2_geog][2] * lambda_2 + vertices_geog[id3_geog][2] * lambda_3
+    etrs_lat = vertices_geog[id1_geog][3] * lambda_1 + vertices_geog[id2_geog][3] * lambda_2 + vertices_geog[id3_geog][3] * lambda_3
+    x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, _ = etrsgeog_to_etrs35fin.TransformPoint(etrs_lon, etrs_lat)
+    return x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, etrs_lon, etrs_lat
+
+def refine_triangle(vertices, id1_geog, id2_geog, id3_geog, refinement_threshold_in_shape, shape, refinement_threshold_outside, vertices_geog, new_triangles, map_long_to_short_id, depth=0):
+    lon1 = vertices_geog[id1_geog][0]
+    lat1 = vertices_geog[id1_geog][1]
+    lon2 = vertices_geog[id2_geog][0]
+    lat2 = vertices_geog[id2_geog][1]
+    lon3 = vertices_geog[id3_geog][0]
+    lat3 = vertices_geog[id3_geog][1]
+
+    #print(lon1, lat1, lon2, lat2, lon3, lat3, id1_geog, id2_geog, id3_geog)
+    if False:
+        x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, _, _ = etrs_approx_from_lonlat(vertices_geog, lon1, lat1, lon2, lat2, lon3, lat3, id1_geog, id2_geog, id3_geog, lon1, lat1)
+        x_tm35fin, y_tm35fin, _, _ = etrs_exact_from_lonlat(triangles, vertices, lon1, lat1)
+        assert abs(x_tm35fin_from_geog_interp - x_tm35fin) < 1e-3, (id1_geog, x_tm35fin_from_geog_interp, x_tm35fin)
+        assert abs(y_tm35fin_from_geog_interp - y_tm35fin) < 1e-3, (id1_geog, y_tm35fin_from_geog_interp, y_tm35fin)
+        x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, _, _ = etrs_approx_from_lonlat(vertices_geog, lon1, lat1, lon2, lat2, lon3, lat3, id1_geog, id2_geog, id3_geog, lon2, lat2)
+        x_tm35fin, y_tm35fin, _, _ = etrs_exact_from_lonlat(triangles, vertices, lon2, lat2)
+        assert abs(x_tm35fin_from_geog_interp - x_tm35fin) < 1e-3, (id2_geog, x_tm35fin_from_geog_interp, x_tm35fin)
+        assert abs(y_tm35fin_from_geog_interp - y_tm35fin) < 1e-3, (id2_geog, y_tm35fin_from_geog_interp, y_tm35fin)
+        x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, _, _ = etrs_approx_from_lonlat(vertices_geog, lon1, lat1, lon2, lat2, lon3, lat3, id1_geog, id2_geog, id3_geog, lon3, lat3)
+        x_tm35fin, y_tm35fin, _, _ = etrs_exact_from_lonlat(triangles, vertices, lon3, lat3)
+        assert abs(x_tm35fin_from_geog_interp - x_tm35fin) < 1e-3, (id3_geog, x_tm35fin_from_geog_interp, x_tm35fin)
+        assert abs(y_tm35fin_from_geog_interp - y_tm35fin) < 1e-3, (id3_geog, y_tm35fin_from_geog_interp, y_tm35fin)
+
+    is_in_shape = shape.Intersects(ogr.CreateGeometryFromWkt('POINT(%.18g %.18g)' % (lon1, lat1))) or \
+                  shape.Intersects(ogr.CreateGeometryFromWkt('POINT(%.18g %.18g)' % (lon2, lat2))) or \
+                  shape.Intersects(ogr.CreateGeometryFromWkt('POINT(%.18g %.18g)' % (lon3, lat3)))
+    refinement_threshold = refinement_threshold_in_shape if is_in_shape else refinement_threshold_outside
+
+    for w1, w2, w3 in ((1, 1, 1), (2, 1, 1), (1, 2, 1), (1, 1, 2), (4, 4, 1), (4, 1, 4), (1, 4, 4)):
+        lon_middle = (w1 * lon1 + w2 * lon2 + w3 * lon3) / (w1 + w2 + w3)
+        lat_middle = (w1 * lat1 + w2 * lat2 + w3 * lat3) / (w1 + w2 + w3)
+        x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, _, _ = etrs_approx_from_lonlat(vertices_geog, lon1, lat1, lon2, lat2, lon3, lat3, id1_geog, id2_geog, id3_geog, lon_middle, lat_middle)
+        x_tm35fin, y_tm35fin, _, _ = etrs_exact_from_lonlat(triangles, vertices, lon_middle, lat_middle)
+        square_error = (x_tm35fin_from_geog_interp - x_tm35fin)**2 + (y_tm35fin_from_geog_interp - y_tm35fin)**2
+        error = square_error ** 0.5
+        if error > refinement_threshold:
+            break
+
+    if error > refinement_threshold:
+        print('Depth %d: Refine triangle (%s, %s, %s) due to error %f' % (depth, id1_geog, id2_geog, id3_geog, error))
+
+        if False:
+            # Refine by adding a point in centre and creating 3 triangles ==> does not converge
+            id_middle = 'centre_of_' + id1_geog + '_' + id2_geog + '_' + id3_geog
+            etrs_lon_exact, etrs_lat_exact, _ = etrs35fin_to_etrsgeog.TransformPoint(x_tm35fin, y_tm35fin)
+            assert id_middle not in vertices_geog
+            vertices_geog[id_middle] = [ lon_middle, lat_middle, etrs_lon_exact, etrs_lat_exact ]
+            refine_triangle(vertices, id1_geog, id2_geog, id_middle, refinement_threshold, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+            refine_triangle(vertices, id1_geog, id3_geog, id_middle, refinement_threshold, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+            refine_triangle(vertices, id2_geog, id3_geog, id_middle, refinement_threshold, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+            return
+
+        x1, y1, _ = kkjgeog_to_kkjproj.TransformPoint(lon1, lat1)
+        x2, y2, _ = kkjgeog_to_kkjproj.TransformPoint(lon2, lat2)
+        x3, y3, _ = kkjgeog_to_kkjproj.TransformPoint(lon3, lat3)
+
+        if False:
+            # Refine by adding a point in the middle of each edge and creating 4 triangles.
+            id_middle_12 = 'middle_of_' + min(id1_geog, id2_geog) + '_' + max(id1_geog, id2_geog)
+            id_middle_13 = 'middle_of_' + min(id1_geog, id3_geog) + '_' + max(id1_geog, id3_geog)
+            id_middle_23 = 'middle_of_' + min(id2_geog, id3_geog) + '_' + max(id2_geog, id3_geog)
+            lon_middle_12 = (lon1 + lon2) / 2
+            lat_middle_12 = (lat1 + lat2) / 2
+            lon_middle_13 = (lon1 + lon3) / 2
+            lat_middle_13 = (lat1 + lat3) / 2
+            lon_middle_23 = (lon2 + lon3) / 2
+            lat_middle_23 = (lat2 + lat3) / 2
+
+            x_middle_12 = (x1 + x2) / 2
+            y_middle_12 = (y1 + y2) / 2
+            x_middle_13 = (x1 + x3) / 2
+            y_middle_13 = (y1 + y3) / 2
+            x_middle_23 = (x2 + x3) / 2
+            y_middle_23 = (y2 + y3) / 2
+
+            for lon, lat, x, y, id in [
+                (lon_middle_12, lat_middle_12, x_middle_12, y_middle_12, id_middle_12),
+                (lon_middle_13, lat_middle_13, x_middle_13, y_middle_13, id_middle_13),
+                (lon_middle_23, lat_middle_23, x_middle_23, y_middle_23, id_middle_23) ]:
+                if id not in vertices_geog:
+                    try:
+                        _, _, etrs_lon_exact, etrs_lat_exact = etrs_exact_from_lonlat(triangles, vertices, lon, lat)
+                    except:
+                        lon, lat, _ = kkjproj_to_kkjgeog.TransformPoint(x, y)
+                        _, _, etrs_lon_exact, etrs_lat_exact = etrs_exact_from_lonlat(triangles, vertices, lon, lat)
+                    vertices_geog[id] = [ lon, lat, etrs_lon_exact, etrs_lat_exact ]
+
+            refine_triangle(vertices, id1_geog, id_middle_12, id_middle_13, refinement_threshold, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+            refine_triangle(vertices, id2_geog, id_middle_12, id_middle_23, refinement_threshold, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+            refine_triangle(vertices, id3_geog, id_middle_13, id_middle_23, refinement_threshold, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+            refine_triangle(vertices, id_middle_12, id_middle_13, id_middle_23, refinement_threshold, vertices_geog, new_triangles)
+            return
+
+        # Refine by adding an intermediate point in the largest edge
+        d12 = (x1 - x2)**2 + (y1 - y2) **2
+        d13 = (x1 - x3)**2 + (y1 - y3) **2
+        d23 = (x2 - x3)**2 + (y2 - y3) **2
+        if d12 >= d13 and d12 >= d23:
+            lon_middle = (lon1 + lon2) / 2
+            lat_middle = (lat1 + lat2) / 2
+            x_middle = (x1 + x2) / 2
+            y_middle = (y1 + y2) / 2
+            long_id = 'middle_of_' + min(id1_geog, id2_geog) + '_' + max(id1_geog, id2_geog)
+            id_A1 = id1_geog
+            id_A2 = id3_geog
+            id_B1 = id2_geog
+            id_B2 = id3_geog
+        elif d13 >= d12 and d13 >= d23:
+            lon_middle = (lon1 + lon3) / 2
+            lat_middle = (lat1 + lat3) / 2
+            x_middle = (x1 + x3) / 2
+            y_middle = (y1 + y3) / 2
+            long_id = 'middle_of_' + min(id1_geog, id3_geog) + '_' + max(id1_geog, id3_geog)
+            id_A1 = id1_geog
+            id_A2 = id2_geog
+            id_B1 = id3_geog
+            id_B2 = id2_geog
+        else:
+            lon_middle = (lon2 + lon3) / 2
+            lat_middle = (lat2 + lat3) / 2
+            x_middle = (x2 + x3) / 2
+            y_middle = (y2 + y3) / 2
+            long_id = 'middle_of_' + min(id2_geog, id3_geog) + '_' + max(id2_geog, id3_geog)
+            id_A1 = id2_geog
+            id_A2 = id1_geog
+            id_B1 = id3_geog
+            id_B2 = id1_geog
+
+        if long_id not in map_long_to_short_id:
+            try:
+                _, _, etrs_lon_exact, etrs_lat_exact = etrs_exact_from_lonlat(triangles, vertices, lon_middle, lat_middle)
+            except:
+                lon_middle, lat_middle, _ = kkjproj_to_kkjgeog.TransformPoint(x_middle, y_middle)
+                _, _, etrs_lon_exact, etrs_lat_exact = etrs_exact_from_lonlat(triangles, vertices, lon_middle, lat_middle)
+
+            short_id = '_gen' + str(len(map_long_to_short_id)-1)
+            assert short_id not in vertices_geog
+            map_long_to_short_id[long_id] = short_id
+
+            vertices_geog[short_id] = [ lon_middle, lat_middle, etrs_lon_exact, etrs_lat_exact ]
+
+        short_id = map_long_to_short_id[long_id]
+
+        refine_triangle(vertices, short_id, id_A1, id_A2, refinement_threshold_in_shape, shape, refinement_threshold_outside, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+        refine_triangle(vertices, short_id, id_B1, id_B2, refinement_threshold_in_shape, shape, refinement_threshold_outside, vertices_geog, new_triangles, map_long_to_short_id, depth+1)
+
+    else:
+        new_triangles.append((id1_geog, id2_geog, id3_geog))
+
+
+def refine_triangulation(vertices_geog, triangles, refinement_threshold_in_shape, shape, refinement_threshold_outside):
+
+    new_vertices_geog = {}
+    for k in vertices_geog:
+        new_vertices_geog[k] = vertices_geog[k]
+    new_triangles = []
+    map_long_to_short_id = {}
+    for (id1, id2, id3) in triangles:
+        refine_triangle(vertices, id1, id2, id3, refinement_threshold_in_shape, shape, refinement_threshold_outside, new_vertices_geog, new_triangles, map_long_to_short_id)
+    return (new_vertices_geog, new_triangles)
+
 grid_min_easting, grid_max_easting, grid_stepx, grid_min_northing, grid_max_northing, grid_stepy, grid_delta_eastings = read_grid(os.path.join(dir_data, 'grid-YKJ-ETRSTM35FIN-L-I-1km-Windows.asc'))
 grid_min_easting2, grid_max_easting2, grid_stepx2, grid_min_northing2, grid_max_northing2, grid_stepy2, grid_delta_northings = read_grid(os.path.join(dir_data, 'grid-YKJ-ETRSTM35FIN-P-E-1km-Windows.asc'))
 assert grid_min_easting == grid_min_easting2
@@ -124,150 +308,270 @@ vertices, vertices_geog = read_vertices()
 triangles, envelope = read_triangles()
 xmin, xmax, ymin, ymax = envelope.GetEnvelope()
 
+def dump_triangles_geog(filename, layername, triangles, vertices):
+    ds = ogr.GetDriverByName('GPKG').CreateDataSource(filename)
+    lyr = ds.CreateLayer(layername, geom_type = ogr.wkbPolygon, srs = kkjgeog)
+    for id1, id2, id3 in triangles:
+        lon1 = vertices_geog[id1][0]
+        lat1 = vertices_geog[id1][1]
+        lon2 = vertices_geog[id2][0]
+        lat2 = vertices_geog[id2][1]
+        lon3 = vertices_geog[id3][0]
+        lat3 = vertices_geog[id3][1]
+        f = ogr.Feature(lyr.GetLayerDefn())
+        tri_geom = ogr.CreateGeometryFromWkt('POLYGON((%.18g %.18g,%.18g %.18g,%.18g %.18g,%.18g %.18g))' % (lon1, lat1, lon2, lat2, lon3, lat3, lon1, lat1))
+        f.SetGeometry(tri_geom)
+        lyr.CreateFeature(f)
+
+ds = ogr.Open(os.path.join(dir_data, 'finland.gpkg'))
+lyr = ds.GetLayer(0)
+f = lyr.GetNextFeature()
+shape = f.GetGeometryRef().Clone()
+
+if use_refinement:
+    dump_triangles_geog(os.path.join(dir_data, 'triangles_geog.gpkg'), 'triangles_geog', triangles, vertices_geog)
+    refinement_threshold_in_shape = 0.001
+    refinement_threshold_outside = 0.01
+
+    vertices_geog, triangles_geog = refine_triangulation(vertices_geog, triangles, refinement_threshold_in_shape, shape.Buffer(0.1), refinement_threshold_outside)
+    dump_triangles_geog(os.path.join(dir_data, 'triangles_geog_refined.gpkg'), 'triangles_geog_refined', triangles_geog, vertices_geog)
+
+else:
+    triangles_geog = triangles
+
+class MyFloat:
+    def __init__(self, f):
+        self.f = f
+
+j = {}
+j['vertices'] = []
+j['triangles'] = []
+for k in vertices_geog:
+    j['vertices'].append([ k, MyFloat(vertices_geog[k][0]), MyFloat(vertices_geog[k][1]), MyFloat(vertices_geog[k][2]), MyFloat(vertices_geog[k][3]) ])
+for id1, id2, id3 in triangles_geog:
+    j['triangles'].append([id1, id2, id3])
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, MyFloat):
+            return float('%.9f' % obj.f)
+        return json.JSONEncoder.default(self, obj)
+
+open(os.path.join(dir_data, 'triangulation.json'), 'wt').write(DecimalEncoder().encode(j))
+
+print('New number of triangles: ', len(triangles_geog), 'Old number of triangles: ', len(triangles))
+print('New number of vertices: ', len(vertices_geog), 'Old number of vertices: ', len(vertices))
+
+
 # Check influence of northings in interpolation quality
 #ymax = (1 * ymin + 2 * ymax) / 3
 
-bias_easting = 0
-bias_northing = 0
+class Stat:
+    def __init__(self):
+        self.count_points = 0
+        self.total_square_error = 0
+        self.max_error = 0
+        self.total_abs_error = 0
+        self.points_below_1mm = 0
+        self.points_below_2mm = 0
+        self.points_below_3mm = 0
+        self.points_below_4mm = 0
+        self.points_below_5mm = 0
+        self.points_below_1cm = 0
+        self.points_below_2cm = 0
+        self.points_below_5cm = 0
+        self.points_below_10cm = 0
+        self.points_below_20cm = 0
+        self.total_error_easting = 0
+        self.total_error_northing = 0
+        self.total_error_lon_lat_valid = False
+        self.total_error_lon = 0
+        self.total_error_lat = 0
 
-for iteration in range(2):
-
-    if iteration == 1:
-        print('\nDoing a second iteration with bias compensation:')
-
-    count_points = 0
-    total_square_error = 0
-    max_error = 0
-    total_abs_error = 0
-    points_below_2cm = 0
-    points_below_5cm = 0
-    points_below_10cm = 0
-    points_below_20cm = 0
-    total_error_easting = 0
-    total_error_northing = 0
-
-    count_points_grid = 0
-    total_square_error_grid = 0
-    total_abs_error_grid = 0
-    max_error_grid = 0
-    total_error_easting_grid = 0
-    total_error_northing_grid = 0
-
-    # Sample random points inside the triangulation
-    for i in range(20000):
-        x = random.uniform(xmin, xmax)
-        y = random.uniform(ymin, ymax)
-
-    #for k in vertices:
-    #    x = vertices[k][0]
-    #    y = vertices[k][1]
-        p = ogr.CreateGeometryFromWkt('POINT (%.18g %.18g)' % (x,y))
-        if not p.Intersects(envelope):
-            continue
-
-        # Perform barycentric interpolation on projected coordinates
-        ret = find_triangle(triangles, vertices, x, y)
-        assert ret
-        id1, id2, id3, lambda_1, lambda_2, lambda_3 = ret
-        x_tm35fin = vertices[id1][2] * lambda_1 + vertices[id2][2] * lambda_2 + vertices[id3][2] * lambda_3
-        y_tm35fin = vertices[id1][3] * lambda_1 + vertices[id2][3] * lambda_2 + vertices[id3][3] * lambda_3
-
-        if x >= grid_min_easting and x <= grid_max_easting and y >= grid_min_northing and y <= grid_max_northing:
-            float_i = (x - grid_min_easting) / grid_stepx
-            i = int(float_i)
-            float_j = (y - grid_min_northing) / grid_stepy
-            j = int(float_j)
-            if i + 1 < grid_width and j + 1 < grid_height and \
-               grid_delta_eastings[j][i] != -999999.0 and \
-               grid_delta_eastings[j][i+1] != -999999.0 and \
-               grid_delta_eastings[j+1][i] != -999999.0 and \
-               grid_delta_eastings[j+1][i+1] != -999999.0 and \
-               grid_delta_northings[j][i] != -999999.0 and \
-               grid_delta_northings[j][i+1] != -999999.0 and \
-               grid_delta_northings[j+1][i] != -999999.0 and \
-               grid_delta_northings[j+1][i+1] != -999999.0:
-
-                di = float_i - i
-                dj = float_j - j
-                assert di >= 0 and di <= 1
-                assert dj >= 0 and dj <= 1
-                dx = (1 - di) * (1 - dj) * grid_delta_eastings[j][i] + \
-                     di * (1 - dj) * grid_delta_eastings[j][i+1] + \
-                     (1 - di) * dj * grid_delta_eastings[j+1][i] + \
-                     di * dj * grid_delta_eastings[j+1][i+1]
-                dy = (1 - di) * (1 - dj) * grid_delta_northings[j][i] + \
-                     di * (1 - dj) * grid_delta_northings[j][i+1] + \
-                     (1 - di) * dj * grid_delta_northings[j+1][i] + \
-                     di * dj * grid_delta_northings[j+1][i+1]
-
-                x_tm35fin_grid = x + dx
-                y_tm35fin_grid = y + dy
-                # print (x_tm35fin, y_tm35fin, x_tm35fin_grid, y_tm35fin_grid)
-                count_points_grid += 1
-                square_error = (x_tm35fin_grid - x_tm35fin)**2 + (y_tm35fin_grid - y_tm35fin)**2
-                total_square_error_grid += square_error
-                error = square_error ** 0.5
-                if error > max_error_grid:
-                    max_error_grid = error
-                total_abs_error_grid += error
-
-                total_error_easting_grid += x_tm35fin_grid - x_tm35fin
-                total_error_northing_grid += y_tm35fin_grid - y_tm35fin
-
-        # Perform barycentric interpolation on geographic coordinates
-        kkj_lon, kkj_lat, _ = kkjproj_to_kkjgeog.TransformPoint(x, y)
-        ret = find_triangle(triangles, vertices_geog, kkj_lon, kkj_lat)
-        if ret is None:
-            print('Skipping ', (x, y, kkj_lon, kkj_lat))
-            continue
-        id1, id2, id3, lambda_1, lambda_2, lambda_3 = ret
-        etrs_lon = vertices_geog[id1][2] * lambda_1 + vertices_geog[id2][2] * lambda_2 + vertices_geog[id3][2] * lambda_3
-        etrs_lat = vertices_geog[id1][3] * lambda_1 + vertices_geog[id2][3] * lambda_2 + vertices_geog[id3][3] * lambda_3
-        x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, _ = etrsgeog_to_etrs35fin.TransformPoint(etrs_lon, etrs_lat)
-
-        x_tm35fin_from_geog_interp -= bias_easting
-        y_tm35fin_from_geog_interp -= bias_northing
-
-        #print(x, y, x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp)
-        count_points += 1
-        square_error = (x_tm35fin_from_geog_interp - x_tm35fin)**2 + (y_tm35fin_from_geog_interp - y_tm35fin)**2
-        total_square_error += square_error
+    def add_point(self, x_ref, y_ref, x, y, lon, lat):
+        self.count_points += 1
+        square_error = (x_ref - x)**2 + (y_ref - y)**2
+        self.total_square_error += square_error
         error = square_error ** 0.5
-        if error > max_error:
-            max_error = error
-        total_abs_error += error
+        if error > self.max_error:
+            self.max_error = error
+        self.total_abs_error += error
+        if error < 0.001:
+            self.points_below_1mm += 1
+        if error < 0.002:
+            self.points_below_2mm += 1
+        if error < 0.003:
+            self.points_below_3mm += 1
+        if error < 0.004:
+            self.points_below_4mm += 1
+        if error < 0.005:
+            self.points_below_5mm += 1
+        if error < 0.01:
+            self.points_below_1cm += 1
         if error < 0.02:
-            points_below_2cm += 1
+            self.points_below_2cm += 1
         if error < 0.05:
-            points_below_5cm += 1
+            self.points_below_5cm += 1
         if error < 0.10:
-            points_below_10cm += 1
+            self.points_below_10cm += 1
         if error < 0.20:
-            points_below_20cm += 1
+            self.points_below_20cm += 1
 
-        total_error_easting += x_tm35fin_from_geog_interp - x_tm35fin
-        total_error_northing += y_tm35fin_from_geog_interp - y_tm35fin
+        self.total_error_easting += x - x_ref
+        self.total_error_northing += y - y_ref
 
-    print('Triangulation from geographic coordinates interpolation compared to triangulation from projected coordinates:')
-    print('RMSE: %f m' % (total_square_error / count_points)**0.5)
-    print('Mean absolute error: %f m' % (total_abs_error / count_points))
-    print('Max error: %f m' % (max_error))
-    print('Percentage of points with max 2cm error: %.02f %%' % (100.0 * points_below_2cm / count_points))
-    print('Percentage of points with max 5cm error: %.02f %%' % (100.0 * points_below_5cm / count_points))
-    print('Percentage of points with max 10cm error: %.02f %%' % (100.0 * points_below_10cm / count_points))
-    print('Percentage of points with max 20cm error: %.02f %%' % (100.0 * points_below_20cm / count_points))
+        if not (lat == 0 and lon == 0):
+            lon_ref, lat_ref, _ = etrs35fin_to_etrsgeog.TransformPoint(x_ref, y_ref)
+            self.total_error_lon_lat_valid = True
+            self.total_error_lon += lon - lon_ref
+            self.total_error_lat += lat - lat_ref
 
-    bias_easting = total_error_easting / count_points
-    bias_northing = total_error_northing / count_points
+    def display(self):
+        print('RMSE: %f m' % (self.total_square_error / self.count_points)**0.5)
+        print('Mean absolute error: %f m' % (self.total_abs_error / self.count_points))
+        print('Max error: %f m' % (self.max_error))
+        print('Percentage of points with max 1mm error: %.02f %%' % (100.0 * self.points_below_1mm / self.count_points))
+        print('Percentage of points with max 2mm error: %.02f %%' % (100.0 * self.points_below_2mm / self.count_points))
+        print('Percentage of points with max 3mm error: %.02f %%' % (100.0 * self.points_below_3mm / self.count_points))
+        print('Percentage of points with max 4mm error: %.02f %%' % (100.0 * self.points_below_4mm / self.count_points))
+        print('Percentage of points with max 5mm error: %.02f %%' % (100.0 * self.points_below_5mm / self.count_points))
+        print('Percentage of points with max 1cm error: %.02f %%' % (100.0 * self.points_below_2cm / self.count_points))
+        print('Percentage of points with max 2cm error: %.02f %%' % (100.0 * self.points_below_2cm / self.count_points))
+        print('Percentage of points with max 5cm error: %.02f %%' % (100.0 * self.points_below_5cm / self.count_points))
+        print('Percentage of points with max 10cm error: %.02f %%' % (100.0 * self.points_below_10cm / self.count_points))
+        print('Percentage of points with max 20cm error: %.02f %%' % (100.0 * self.points_below_20cm / self.count_points))
 
-    print('Bias in eastings: %f' % bias_easting)
-    print('Bias in northings: %f' % bias_northing)
+        bias_easting = self.total_error_easting / self.count_points
+        bias_northing = self.total_error_northing / self.count_points
+        print('Bias in eastings: %f m' % bias_easting)
+        print('Bias in northings: %f m' % bias_northing)
 
-    if iteration == 0:
-        print('\n')
-        print('Grid interpolation compared to triangulation from projected coordinates:')
-        print('RMSE: %f m' % (total_square_error_grid / count_points_grid)**0.5)
-        print('Mean absolute error: %f m' % (total_abs_error_grid / count_points_grid))
-        print('Max error: %f m' % (max_error_grid))
-        print('Bias in eastings: %f' % (total_error_easting_grid / count_points_grid))
-        print('Bias in northings: %f' % (total_error_northing_grid / count_points_grid))
+        if self.total_error_lon_lat_valid:
+            bias_lon = self.total_error_lon / self.count_points
+            bias_lat = self.total_error_lat / self.count_points
+            print('Bias in longitude: %f deg' % bias_lon)
+            print('Bias in latitude: %f deg' % bias_lat)
+
+
+stat_all = Stat()
+stat_inside = Stat()
+stat_outside = Stat()
+stat_grid = Stat()
+
+def process_point(x,y):
+
+    kkj_lon, kkj_lat, _ = kkjproj_to_kkjgeog.TransformPoint(x, y)
+
+    p = ogr.CreateGeometryFromWkt('POINT (%.18g %.18g)' % (x,y))
+    if not p.Intersects(envelope):
+        return
+
+    # Perform barycentric interpolation on projected coordinates
+    ret = find_triangle(triangles, vertices, x, y)
+    assert ret
+    id1, id2, id3, lambda_1, lambda_2, lambda_3 = ret
+    x_tm35fin = vertices[id1][2] * lambda_1 + vertices[id2][2] * lambda_2 + vertices[id3][2] * lambda_3
+    y_tm35fin = vertices[id1][3] * lambda_1 + vertices[id2][3] * lambda_2 + vertices[id3][3] * lambda_3
+
+    if x >= grid_min_easting and x <= grid_max_easting and y >= grid_min_northing and y <= grid_max_northing:
+        float_i = (x - grid_min_easting) / grid_stepx
+        i = int(float_i)
+        float_j = (y - grid_min_northing) / grid_stepy
+        j = int(float_j)
+        if i + 1 < grid_width and j + 1 < grid_height and \
+            grid_delta_eastings[j][i] != -999999.0 and \
+            grid_delta_eastings[j][i+1] != -999999.0 and \
+            grid_delta_eastings[j+1][i] != -999999.0 and \
+            grid_delta_eastings[j+1][i+1] != -999999.0 and \
+            grid_delta_northings[j][i] != -999999.0 and \
+            grid_delta_northings[j][i+1] != -999999.0 and \
+            grid_delta_northings[j+1][i] != -999999.0 and \
+            grid_delta_northings[j+1][i+1] != -999999.0:
+
+            di = float_i - i
+            dj = float_j - j
+            assert di >= 0 and di <= 1
+            assert dj >= 0 and dj <= 1
+            dx = (1 - di) * (1 - dj) * grid_delta_eastings[j][i] + \
+                    di * (1 - dj) * grid_delta_eastings[j][i+1] + \
+                    (1 - di) * dj * grid_delta_eastings[j+1][i] + \
+                    di * dj * grid_delta_eastings[j+1][i+1]
+            dy = (1 - di) * (1 - dj) * grid_delta_northings[j][i] + \
+                    di * (1 - dj) * grid_delta_northings[j][i+1] + \
+                    (1 - di) * dj * grid_delta_northings[j+1][i] + \
+                    di * dj * grid_delta_northings[j+1][i+1]
+
+            x_tm35fin_grid = x + dx
+            y_tm35fin_grid = y + dy
+            # print (x_tm35fin, y_tm35fin, x_tm35fin_grid, y_tm35fin_grid)
+
+            stat_grid.add_point(x_tm35fin, y_tm35fin, x_tm35fin_grid, y_tm35fin_grid, 0, 0)
+
+    # Perform barycentric interpolation on geographic coordinates
+    ret = find_triangle(triangles_geog, vertices_geog, kkj_lon, kkj_lat)
+    if ret is None:
+        print('Skipping ', (x, y, kkj_lon, kkj_lat))
+        return
+    id1, id2, id3, lambda_1, lambda_2, lambda_3 = ret
+    etrs_lon = vertices_geog[id1][2] * lambda_1 + vertices_geog[id2][2] * lambda_2 + vertices_geog[id3][2] * lambda_3
+    etrs_lat = vertices_geog[id1][3] * lambda_1 + vertices_geog[id2][3] * lambda_2 + vertices_geog[id3][3] * lambda_3
+    x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, _ = etrsgeog_to_etrs35fin.TransformPoint(etrs_lon, etrs_lat)
+
+    #print(x, y, x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp)
+
+    stat_all.add_point(x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, etrs_lon, etrs_lat)
+
+    if shape.Intersects(ogr.CreateGeometryFromWkt('POINT (%.18g %.18g)' % (kkj_lon,kkj_lat))):
+        stat_inside.add_point(x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, etrs_lon, etrs_lat)
+    else:
+        stat_outside.add_point(x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, etrs_lon, etrs_lat)
+
+
+# Sample random points inside the triangulation
+#for i in range(20000):
+#    x = random.uniform(xmin, xmax)
+#    y = random.uniform(ymin, ymax)
+#    process_point(x, y)
+
+#for k in vertices:
+#    x = vertices[k][0]
+#    y = vertices[k][1]
+#    process_point(x, y)
+
+for (id1, id2, id3) in triangles:
+    x1 = vertices[id1][0]
+    y1 = vertices[id1][1]
+    x2 = vertices[id2][0]
+    y2 = vertices[id2][1]
+    x3 = vertices[id3][0]
+    y3 = vertices[id3][1]
+    i = 0
+    while i < 10:
+        lambda_1 = random.uniform(0, 1)
+        lambda_2 = random.uniform(0, 1)
+        if lambda_1 + lambda_2 > 1:
+            continue
+        i += 1
+        lambda_3 = 1 - lambda_1 - lambda_2
+        x = lambda_1 * x1 + lambda_2 * x2 + lambda_3 * x3
+        y = lambda_1 * y1 + lambda_2 * y2 + lambda_3 * y3
+        process_point(x, y)
+
+print('-------------------------------------------------------------------------------------------------------------')
+print('Triangulation from geographic coordinates interpolation compared to triangulation from projected coordinates:')
+print('-------------------------------------------------------------------------------------------------------------')
+print('\n')
+print('- Global stats:')
+stat_all.display()
+print('\n')
+print('- Points inside shape:')
+stat_inside.display()
+print('\n')
+print('- Points outside shape:')
+stat_outside.display()
+
+print('\n')
+print('------------------------------------------------------------------------')
+print('Grid interpolation compared to triangulation from projected coordinates:')
+print('------------------------------------------------------------------------')
+stat_grid.display()
