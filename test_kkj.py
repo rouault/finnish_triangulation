@@ -458,6 +458,9 @@ stat_inside = Stat()
 stat_outside = Stat()
 stat_grid = Stat()
 
+f = open('output.csv', 'wt')
+f.write('easting_kkj,northing_kkj,easting_etrs_exact,northing_etrs_exact,easting_etrs_interpolated,northing_etrs_interpolated,easting_interpolated_minus_exact,northing_interpolated_minus_exact\n')
+
 def process_point(x,y):
 
     kkj_lon, kkj_lat, _ = kkjproj_to_kkjgeog.TransformPoint(x, y)
@@ -519,13 +522,14 @@ def process_point(x,y):
 
     #print(x, y, x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp)
 
+    f.write('%.15g,%.15g,%.15g,%.15g,%.15g,%.15g,%.15g,%.15g\n' % (x, y, x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, x_tm35fin_from_geog_interp - x_tm35fin, y_tm35fin_from_geog_interp - y_tm35fin))
+
     stat_all.add_point(x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, etrs_lon, etrs_lat)
 
     if shape.Intersects(ogr.CreateGeometryFromWkt('POINT (%.18g %.18g)' % (kkj_lon,kkj_lat))):
         stat_inside.add_point(x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, etrs_lon, etrs_lat)
     else:
         stat_outside.add_point(x_tm35fin, y_tm35fin, x_tm35fin_from_geog_interp, y_tm35fin_from_geog_interp, etrs_lon, etrs_lat)
-
 
 # Sample random points inside the triangulation
 #for i in range(20000):
@@ -575,3 +579,5 @@ print('------------------------------------------------------------------------'
 print('Grid interpolation compared to triangulation from projected coordinates:')
 print('------------------------------------------------------------------------')
 stat_grid.display()
+
+f.close()
