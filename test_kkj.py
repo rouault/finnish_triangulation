@@ -331,7 +331,7 @@ shape = f.GetGeometryRef().Clone()
 if use_refinement:
     dump_triangles_geog(os.path.join(dir_data, 'triangles_geog.gpkg'), 'triangles_geog', triangles, vertices_geog)
     refinement_threshold_in_shape = 0.001
-    refinement_threshold_outside = 0.01
+    refinement_threshold_outside = 0.001
 
     vertices_geog, triangles_geog = refine_triangulation(vertices_geog, triangles, refinement_threshold_in_shape, shape.Buffer(0.1), refinement_threshold_outside)
     dump_triangles_geog(os.path.join(dir_data, 'triangles_geog_refined.gpkg'), 'triangles_geog_refined', triangles_geog, vertices_geog)
